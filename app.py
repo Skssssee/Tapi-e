@@ -7,8 +7,10 @@ import re
 import time
 import urllib.parse
 
-app = FastAPI()
+# Initialize App
+app = FastAPI(title="Koyeb Video API")
 
+# Enable CORS for your website
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,6 +18,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- 20 PROXY LIST (Account 1 & Account 2) ---
 PROXIES = [
     "http://uppezuyk:c2bfaa6diuyf@31.59.20.176:6754", "http://uppezuyk:c2bfaa6diuyf@23.95.150.145:6114",
     "http://uppezuyk:c2bfaa6diuyf@198.23.239.134:6540", "http://uppezuyk:c2bfaa6diuyf@45.38.107.97:6014",
@@ -29,69 +32,121 @@ PROXIES = [
     "http://fqxzwtzv:c65sasel8qr8@142.111.67.146:5611", "http://fqxzwtzv:c65sasel8qr8@191.96.254.138:6185"
 ]
 
+# Simple Cache to prevent duplicate proxy requests
 CACHE = {}
 
-def get_vid(u):
-    m = re.search(r"(?:v=|\/|be\/)([0-9A-Za-z_-]{11})", u)
-    return m.group(1) if m else None
+def get_video_id(url: str):
+    """Extracts 11-char YouTube ID."""
+    match = re.search(r"(?:v=|\/|be\/)([0-9A-Za-z_-]{11})", url)
+    return match.group(1) if match else None
+
+@app.get("/")
+def health_check():
+    return {"status": "API is online", "proxies": len(PROXIES)}
 
 @app.get("/download/{url:path}")
-async def get_data(url: str, request: Request):
-    vid = get_vid(url)
-    if not vid: return {"success": False, "error": "Invalid URL"}
+async def fetch_video_info(url: str, request: Request):
+    vid = get_video_id(url)
+    if not vid:
+        return {"success": False, "error": "Invalid YouTube URL"}
     
+    # 1. Check Cache (15 min)
     if vid in CACHE and time.time() < CACHE[vid]["exp"]:
         return CACHE[vid]["data"]
 
+    # 2. Get the current domain automatically (e.g., your-app.koyeb.app)
+    # This ensures the /stream links always point to the right place
     base_url = str(request.base_url).rstrip('/')
-    target = f"https://www.youtube.com/watch?v={vid}"
+    target_yt_link = f"https://www.youtube.com/watch?v={vid}"
     
+    # 3. Attempt extraction using Proxies
     for _ in range(3):
-        p = random.choice(PROXIES)
+        selected_proxy = random.choice(PROXIES)
         try:
-            r = requests.post("https://api.vidssave.com/api/contentsite_api/media/parse", 
-                data={"auth": "20250901majwlqo", "domain": "api-ak.vidssave.com", "origin": "cache", "link": target},
-                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://vidssave.com/"},
-                proxies={"http": p, "https": p}, timeout=10)
+            payload = {
+                "auth": "20250901majwlqo",
+                "domain": "api-ak.vidssave.com",
+                "origin": "cache",
+                "link": target_yt_link
+            }
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://vidssave.com/"
+            }
             
-            j = r.json()
-            if j.get("status") == 1:
-                data = j["data"]
+            response = requests.post(
+                "https://api.vidssave.com/api/contentsite_api/media/parse", 
+                data=payload, 
+                headers=headers,
+                proxies={"http": selected_proxy, "https": selected_proxy}, 
+                timeout=12
+            )
+            
+            json_data = response.json()
+            if json_data.get("status") == 1 and "data" in json_data:
+                video_data = json_data["data"]
+                
                 formats = []
-                for f in data.get("resources", []):
-                    if f.get("download_mode") == "direct":
-                        encoded_url = urllib.parse.quote(f.get("download_url"))
-                        stream_link = f"{base_url}/stream?url={encoded_url}"
+                for res in video_data.get("resources", []):
+                    if res.get("download_mode") == "direct":
+                        # Tunnel the Forbidden link through our /stream endpoint
+                        raw_url = res.get("download_url")
+                        encoded_url = urllib.parse.quote(raw_url)
+                        proxied_url = f"{base_url}/stream?url={encoded_url}"
                         
                         formats.append({
-                            "q": f.get("quality"),
-                            "f": f.get("format"),
-                            "s": round(f.get("size", 0)/1048576, 1),
-                            "u": stream_link
+                            "quality": res.get("quality"),
+                            "format": res.get("format"),
+                            "size_mb": round(res.get("size", 0) / 1048576, 1),
+                            "url": proxied_url
                         })
                 
-                res = {"success": True, "title": data.get("title"), "thumbnail": data.get("thumbnail"), "formats": formats}
-                CACHE[vid] = {"data": res, "exp": time.time() + 900}
-                return res
-        except: continue
-    return {"success": False, "error": "API Error"}
+                final_response = {
+                    "success": True,
+                    "title": video_data.get("title"),
+                    "thumbnail": video_data.get("thumbnail"),
+                    "formats": formats
+                }
+                
+                # Update Cache
+                CACHE[vid] = {"data": final_response, "exp": time.time() + 900}
+                return final_response
+        except:
+            continue
+
+    return {"success": False, "error": "API or Proxies are currently busy."}
 
 @app.get("/stream")
-async def stream_video(url: str = Query(...)):
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://vidssave.com/"}
+async def tunnel_video(url: str = Query(...)):
+    """
+    Acts as a bridge between the blocked Vidssave link and the user.
+    """
+    stream_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://vidssave.com/"
+    }
     
-    def generate():
-        with requests.get(url, headers=headers, stream=True) as r:
-            for chunk in r.iter_content(chunk_size=256*1024):
+    def stream_generator():
+        with requests.get(url, headers=stream_headers, stream=True) as r:
+            # Using 512KB chunks for Koyeb high-speed streaming
+            for chunk in r.iter_content(chunk_size=524288):
                 yield chunk
 
-    r_head = requests.head(url, headers=headers)
+    # Pre-fetch headers to help browser progress bar
+    try:
+        head_req = requests.head(url, headers=stream_headers, timeout=10)
+        content_length = head_req.headers.get("Content-Length", "")
+        content_type = head_req.headers.get("Content-Type", "video/mp4")
+    except:
+        content_length = ""
+        content_type = "video/mp4"
+    
     return StreamingResponse(
-        generate(),
-        media_type="video/mp4",
+        stream_generator(),
+        media_type=content_type,
         headers={
             "Content-Disposition": 'attachment; filename="video.mp4"',
-            "Content-Length": r_head.headers.get("Content-Length", ""),
+            "Content-Length": content_length,
             "Access-Control-Allow-Origin": "*"
         }
     )
