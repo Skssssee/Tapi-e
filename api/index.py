@@ -1,22 +1,22 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import requests
-import uvicorn
-import urllib.parse
 import random
 import re
+import time
+import urllib.parse
 
-app = FastAPI(title="My Private Vidssave API", version="2.0")
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- YOUR 20 PROXIES (2 ACCOUNTS) ---
+# --- 20 PROXY ROTATION (Dual Accounts) ---
 PROXIES = [
     "http://uppezuyk:c2bfaa6diuyf@31.59.20.176:6754", "http://uppezuyk:c2bfaa6diuyf@23.95.150.145:6114",
     "http://uppezuyk:c2bfaa6diuyf@198.23.239.134:6540", "http://uppezuyk:c2bfaa6diuyf@45.38.107.97:6014",
@@ -30,97 +30,85 @@ PROXIES = [
     "http://fqxzwtzv:c65sasel8qr8@142.111.67.146:5611", "http://fqxzwtzv:c65sasel8qr8@191.96.254.138:6185"
 ]
 
-# Use your exact original headers
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 16; RMX3870 Build/BP2A.250605.015) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.120 Mobile Safari/537.36",
-    "Accept": "*/*",
-    "Origin": "https://vidssave.com",
-    "Referer": "https://vidssave.com/",
-    "X-Requested-With": "mark.via.gp",
-    "Content-Type": "application/x-www-form-urlencoded"
-}
+# Simple Memory Cache
+CACHE = {}
+# Change this to your actual Vercel or Render domain
+DOMAIN = "https://tapi-e.vercel.app" 
 
-# Change this to your live domain (e.g. https://your-app.onrender.com)
-# For local testing, use http://127.0.0.1:8000
-MY_DOMAIN = "http://127.0.0.1:8000"
+def get_vid(u):
+    m = re.search(r"(?:v=|\/|be\/)([0-9A-Za-z_-]{11})", u)
+    return m.group(1) if m else None
 
 @app.get("/download/{url:path}")
-def get_video_data(url: str):
-    session = requests.Session()
-    parse_url = "https://api.vidssave.com/api/contentsite_api/media/parse"
+async def get_data(url: str):
+    vid = get_vid(url)
+    if not vid: return {"success": False, "error": "Invalid URL"}
     
-    # Pick a random proxy to save bandwidth
-    proxy = random.choice(PROXIES)
-    proxies_dict = {"http": proxy, "https": proxy}
+    # 1. Return from Cache (Bandwidth Saver)
+    if vid in CACHE and time.time() < CACHE[vid]["exp"]:
+        return CACHE[vid]["data"]
 
-    payload = {
-        "auth": "20250901majwlqo",
-        "domain": "api-ak.vidssave.com",
-        "origin": "cache",
-        "link": url
-    }
+    target = f"https://www.youtube.com/watch?v={vid}"
     
-    try:
-        resp_raw = session.post(parse_url, data=payload, headers=HEADERS, proxies=proxies_dict, timeout=10)
-        resp = resp_raw.json()
-        
-        if "data" not in resp:
-            return {"success": False, "error": "API Blocked"}
-        
-        video_info = resp["data"]
-        clean_formats = []
-        
-        for res in video_info.get("resources", []):
-            raw_dl_url = res.get("download_url", "")
-            if not raw_dl_url: continue
-
-            # --- THE FIX: Instead of raw URL, we point to our /stream endpoint ---
-            encoded_target = urllib.parse.quote(raw_dl_url)
-            proxied_url = f"{MY_DOMAIN}/stream?url={encoded_target}"
-
-            clean_formats.append({
-                "type": str(res.get("type")).upper(),
-                "format": str(res.get("format")).upper(),
-                "quality": str(res.get("quality")).upper(),
-                "size_mb": round(res.get("size", 0) / 1048576, 2),
-                "url": proxied_url # This link will now work on websites
-            })
+    # 2. Try random proxy to fetch from Vidssave
+    for _ in range(3):
+        p = random.choice(PROXIES)
+        try:
+            r = requests.post("https://api.vidssave.com/api/contentsite_api/media/parse", 
+                data={"auth": "20250901majwlqo", "domain": "api-ak.vidssave.com", "origin": "cache", "link": target},
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://vidssave.com/"},
+                proxies={"http": p, "https": p}, timeout=7)
             
-        return {
-            "success": True,
-            "title": video_info.get("title"),
-            "thumbnail": video_info.get("thumbnail"),
-            "formats": clean_formats
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+            j = r.json()
+            if j.get("status") == 1:
+                data = j["data"]
+                formats = []
+                for f in data.get("resources", []):
+                    if f.get("download_mode") == "direct":
+                        # ENCODE the URL for our /stream tunnel
+                        encoded_url = urllib.parse.quote(f.get("download_url"))
+                        stream_link = f"{DOMAIN}/stream?url={encoded_url}"
+                        
+                        formats.append({
+                            "q": f.get("quality"),
+                            "f": f.get("format"),
+                            "s": round(f.get("size", 0)/1048576, 1),
+                            "u": stream_link
+                        })
+                
+                res = {
+                    "success": True,
+                    "title": data.get("title"),
+                    "thumbnail": data.get("thumbnail"),
+                    "formats": formats
+                }
+                CACHE[vid] = {"data": res, "exp": time.time() + 900}
+                return res
+        except: continue
+
+    return {"success": False, "error": "API Busy"}
 
 @app.get("/stream")
-def stream_video(url: str = Query(...)):
+async def stream_video(url: str = Query(...)):
     """
-    This tunnels the video through your server so the 
-    IP matches the one that requested the link.
+    FIX: Tunnels the download so Vidssave doesn't give a 403 Forbidden error.
     """
-    # Use headers to mimic the original request
-    stream_headers = {"User-Agent": HEADERS["User-Agent"], "Referer": "https://vidssave.com/"}
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://vidssave.com/"}
     
     def generate():
-        with requests.get(url, headers=stream_headers, stream=True) as r:
-            for chunk in r.iter_content(chunk_size=128*1024): # 128KB chunks
+        with requests.get(url, headers=headers, stream=True, timeout=20) as r:
+            for chunk in r.iter_content(chunk_size=128*1024):
                 yield chunk
 
-    # Get file size for the browser progress bar
-    r_head = requests.head(url, headers=stream_headers)
+    # Get file headers
+    r_head = requests.head(url, headers=headers, timeout=10)
     
     return StreamingResponse(
         generate(),
         media_type="video/mp4",
         headers={
             "Content-Disposition": 'attachment; filename="video.mp4"',
-            "Content-Length": r_head.headers.get("Content-Length", "")
+            "Content-Length": r_head.headers.get("Content-Length", ""),
+            "Access-Control-Allow-Origin": "*"
         }
     )
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
