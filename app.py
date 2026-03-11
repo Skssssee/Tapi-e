@@ -15,7 +15,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- YOUR 20 PROXY LIST ---
+# --- 20 PROXY LIST ---
 PROXIES = [
     "http://fqxzwtzv:c65sasel8qr8@31.59.20.176:6754", "http://fqxzwtzv:c65sasel8qr8@23.95.150.145:6114",
     "http://fqxzwtzv:c65sasel8qr8@198.23.239.134:6540", "http://fqxzwtzv:c65sasel8qr8@45.38.107.97:6014",
@@ -29,7 +29,7 @@ PROXIES = [
     "http://uppezuyk:c2bfaa6diuyf@142.111.67.146:5611", "http://uppezuyk:c2bfaa6diuyf@191.96.254.138:6185"
 ]
 
-HEADERS = {
+SCRAPE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 11; RMX3870) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
     "Referer": "https://vidssave.com/",
     "X-Requested-With": "mark.via.gp"
@@ -37,7 +37,7 @@ HEADERS = {
 
 @app.get("/download/{url:path}")
 async def get_video(url: str, request: Request):
-    # FORCE HTTPS to fix the 0.01KB browser block
+    # FORCE HTTPS: This is the ONLY way to stop the 0.01kb mixed-content error
     base_url = str(request.base_url).replace("http://", "https://").rstrip('/')
     
     match = re.search(r"(?:v=|\/|be\/)([0-9A-Za-z_-]{11})", url)
@@ -49,7 +49,7 @@ async def get_video(url: str, request: Request):
         try:
             r = requests.post("https://api.vidssave.com/api/contentsite_api/media/parse", 
                 data={"auth": "20250901majwlqo", "domain": "api-ak.vidssave.com", "origin": "cache", "link": target},
-                headers=HEADERS, proxies={"http": proxy, "https": proxy}, timeout=7)
+                headers=SCRAPE_HEADERS, proxies={"http": proxy, "https": proxy}, timeout=8)
             
             res = r.json()
             if res.get("status") == 1:
@@ -57,7 +57,7 @@ async def get_video(url: str, request: Request):
                 formats = []
                 for f in data.get("resources", []):
                     if f.get("download_mode") == "direct":
-                        # We tunnel the Vidssave redirect to get the actual Google Link data
+                        # We encode the Vidssave redirect URL
                         encoded_url = urllib.parse.quote(f.get("download_url"))
                         formats.append({
                             "q": f.get("quality"),
@@ -67,33 +67,35 @@ async def get_video(url: str, request: Request):
                         })
                 return {"success": True, "title": data.get("title"), "thumbnail": data.get("thumbnail"), "formats": formats}
         except: continue
-    return {"success": False, "error": "Proxies blocked. Check Webshare balance."}
+    return {"success": False, "error": "All 20 proxies failed."}
 
 @app.get("/stream")
 async def stream_video(url: str = Query(...)):
     """
-    This route acts as a bridge. It follows the Vidssave redirect 
-    and streams the GOOGLE VIDEO bytes directly to the user.
+    THE FIX: This follows the Vidssave redirect internally to get the 
+    REAL Googlevideo link and streams it byte-by-byte.
     """
     def generate():
-        # Step 1: Request the redirect URL. 'stream=True' starts the download from Google
-        with requests.get(url, headers=HEADERS, stream=True, allow_redirects=True, timeout=60) as r:
-            # Step 2: Push bytes to the user in 128KB chunks
-            for chunk in r.iter_content(chunk_size=131072):
+        # Using 256KB chunks for smooth playback
+        # allow_redirects=True is MANDATORY to get the real video link
+        with requests.get(url, headers=SCRAPE_HEADERS, stream=True, allow_redirects=True, timeout=120) as r:
+            for chunk in r.iter_content(chunk_size=262144):
                 if chunk: yield chunk
 
-    # Get the real file size from the Google server for the progress bar
+    # Pre-fetch the real Content-Length from Google Video server
     try:
-        head_check = requests.head(url, headers=HEADERS, allow_redirects=True, timeout=10)
+        head_check = requests.head(url, headers=SCRAPE_HEADERS, allow_redirects=True, timeout=15)
         total_size = head_check.headers.get("Content-Length")
+        content_type = head_check.headers.get("Content-Type", "video/mp4")
     except:
         total_size = None
+        content_type = "video/mp4"
 
     response_headers = {
         "Content-Disposition": 'attachment; filename="video.mp4"',
-        "Accept-Ranges": "bytes", # Allows seeking/fast-forwarding
+        "Accept-Ranges": "bytes",
         "Access-Control-Allow-Origin": "*"
     }
     if total_size: response_headers["Content-Length"] = total_size
 
-    return StreamingResponse(generate(), media_type="video/mp4", headers=response_headers)
+    return StreamingResponse(generate(), media_type=content_type, headers=response_headers)
