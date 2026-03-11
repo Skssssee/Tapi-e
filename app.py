@@ -15,7 +15,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- FULL 20 PROXY LIST ---
+# --- YOUR 20 PROXY LIST ---
 PROXIES = [
     "http://fqxzwtzv:c65sasel8qr8@31.59.20.176:6754", "http://fqxzwtzv:c65sasel8qr8@23.95.150.145:6114",
     "http://fqxzwtzv:c65sasel8qr8@198.23.239.134:6540", "http://fqxzwtzv:c65sasel8qr8@45.38.107.97:6014",
@@ -35,13 +35,9 @@ HEADERS = {
     "X-Requested-With": "mark.via.gp"
 }
 
-@app.get("/")
-def root():
-    return {"status": "Koyeb API Active", "proxies": len(PROXIES)}
-
 @app.get("/download/{url:path}")
 async def get_video(url: str, request: Request):
-    # FORCE HTTPS to fix the 0.01kb / mixed content error
+    # FORCE HTTPS to fix the 0.01KB browser block
     base_url = str(request.base_url).replace("http://", "https://").rstrip('/')
     
     match = re.search(r"(?:v=|\/|be\/)([0-9A-Za-z_-]{11})", url)
@@ -61,35 +57,43 @@ async def get_video(url: str, request: Request):
                 formats = []
                 for f in data.get("resources", []):
                     if f.get("download_mode") == "direct":
-                        encoded = urllib.parse.quote(f.get("download_url"))
+                        # We tunnel the Vidssave redirect to get the actual Google Link data
+                        encoded_url = urllib.parse.quote(f.get("download_url"))
                         formats.append({
                             "q": f.get("quality"),
                             "f": f.get("format"),
                             "s": round(f.get("size", 0)/1048576, 1),
-                            "u": f"{base_url}/stream?url={encoded}"
+                            "u": f"{base_url}/stream?url={encoded_url}"
                         })
                 return {"success": True, "title": data.get("title"), "thumbnail": data.get("thumbnail"), "formats": formats}
         except: continue
-    return {"success": False, "error": "All proxies failed. Status 0."}
+    return {"success": False, "error": "Proxies blocked. Check Webshare balance."}
 
 @app.get("/stream")
 async def stream_video(url: str = Query(...)):
-    # Stream with headers to fix Forbidden and 0.01kb errors
+    """
+    This route acts as a bridge. It follows the Vidssave redirect 
+    and streams the GOOGLE VIDEO bytes directly to the user.
+    """
     def generate():
-        with requests.get(url, headers=HEADERS, stream=True, timeout=30) as r:
-            for chunk in r.iter_content(chunk_size=131072): # 128KB chunks
+        # Step 1: Request the redirect URL. 'stream=True' starts the download from Google
+        with requests.get(url, headers=HEADERS, stream=True, allow_redirects=True, timeout=60) as r:
+            # Step 2: Push bytes to the user in 128KB chunks
+            for chunk in r.iter_content(chunk_size=131072):
                 if chunk: yield chunk
 
+    # Get the real file size from the Google server for the progress bar
     try:
-        head = requests.head(url, headers=HEADERS, timeout=10)
-        size = head.headers.get("Content-Length")
-    except: size = None
+        head_check = requests.head(url, headers=HEADERS, allow_redirects=True, timeout=10)
+        total_size = head_check.headers.get("Content-Length")
+    except:
+        total_size = None
 
-    headers = {
+    response_headers = {
         "Content-Disposition": 'attachment; filename="video.mp4"',
-        "Accept-Ranges": "bytes",
+        "Accept-Ranges": "bytes", # Allows seeking/fast-forwarding
         "Access-Control-Allow-Origin": "*"
     }
-    if size: headers["Content-Length"] = size
+    if total_size: response_headers["Content-Length"] = total_size
 
-    return StreamingResponse(generate(), media_type="video/mp4", headers=headers)
+    return StreamingResponse(generate(), media_type="video/mp4", headers=response_headers)
