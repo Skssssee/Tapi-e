@@ -1,28 +1,22 @@
-# Use a lightweight Python image
 FROM python:3.10-slim
 
-# Set the working directory
+# Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements first (improves build speed)
+# Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application
+# Copy all files from your repo to the /app folder
 COPY . .
 
-# Set environment variables for Python
-ENV PYTHONUNBUFFERED=1
+# Set environment variables
 ENV PORT=8000
+ENV PYTHONUNBUFFERED=1
 
-# Expose the port
+# Expose port
 EXPOSE 8000
 
-# THE FIX: Ensure Gunicorn finds "app" inside "app.py"
-# We add --timeout 0 so long video downloads never get cut off
-CMD ["gunicorn", "app:app", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--workers", "4", "--timeout", "0"]
+# THE FIX: We use the absolute path to the app
+CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "app:app", "--timeout", "0"]
+
