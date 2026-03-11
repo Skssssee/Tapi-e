@@ -1,11 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import requests
-import re
 
 app = FastAPI()
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,57 +17,43 @@ HEADERS = {
     "Referer": "https://vidssave.com/"
 }
 
+
 @app.get("/")
 def home():
-    return {"message": "YouTube Download API Running"}
+    return {"status": "API running"}
 
-@app.get("/download")
-def download_video(url: str):
 
-    # extract youtube video id
-    match = re.search(r"(?:v=|\/|be\/)([0-9A-Za-z_-]{11})", url)
-    if not match:
-        return {"success": False, "error": "Invalid YouTube URL"}
+@app.get("/stream")
+def stream_video(request: Request, url: str = Query(...)):
 
-    video_id = match.group(1)
-    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    range_header = request.headers.get("range")
 
-    try:
-        r = requests.post(
-            "https://api.vidssave.com/api/contentsite_api/media/parse",
-            data={
-                "auth": "20250901majwlqo",
-                "domain": "api-ak.vidssave.com",
-                "origin": "cache",
-                "link": youtube_url
-            },
-            headers=HEADERS,
-            timeout=15
-        )
+    headers = HEADERS.copy()
+    if range_header:
+        headers["Range"] = range_header
 
-        res = r.json()
+    r = requests.get(
+        url,
+        headers=headers,
+        stream=True,
+        allow_redirects=True,
+        timeout=60
+    )
 
-        if res.get("status") != 1:
-            return {"success": False, "error": "Video parse failed"}
+    response_headers = {
+        "Content-Type": r.headers.get("Content-Type", "video/mp4"),
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Origin": "*"
+    }
 
-        data = res["data"]
+    if "Content-Length" in r.headers:
+        response_headers["Content-Length"] = r.headers["Content-Length"]
 
-        formats = []
-        for f in data.get("resources", []):
-            if f.get("download_mode") == "direct":
-                formats.append({
-                    "quality": f.get("quality"),
-                    "format": f.get("format"),
-                    "size_mb": round(f.get("size", 0) / 1048576, 2),
-                    "download_url": f.get("download_url")
-                })
+    if "Content-Range" in r.headers:
+        response_headers["Content-Range"] = r.headers["Content-Range"]
 
-        return {
-            "success": True,
-            "title": data.get("title"),
-            "thumbnail": data.get("thumbnail"),
-            "formats": formats
-        }
-
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return StreamingResponse(
+        r.iter_content(chunk_size=8192),
+        status_code=r.status_code,
+        headers=response_headers
+    )
