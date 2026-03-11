@@ -1,3 +1,4 @@
-fastAPI
-uvicorn
-requests
+fastapi==0.104.1
+requests==2.31.0
+uvicorn==0.24.0
+gunicorn==21.2.0
