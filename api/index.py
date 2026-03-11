@@ -16,7 +16,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 20 PROXY ROTATION (Dual Accounts) ---
+# 20 PROXY ROTATION
 PROXIES = [
     "http://uppezuyk:c2bfaa6diuyf@31.59.20.176:6754", "http://uppezuyk:c2bfaa6diuyf@23.95.150.145:6114",
     "http://uppezuyk:c2bfaa6diuyf@198.23.239.134:6540", "http://uppezuyk:c2bfaa6diuyf@45.38.107.97:6014",
@@ -30,27 +30,22 @@ PROXIES = [
     "http://fqxzwtzv:c65sasel8qr8@142.111.67.146:5611", "http://fqxzwtzv:c65sasel8qr8@191.96.254.138:6185"
 ]
 
-# Simple Memory Cache
 CACHE = {}
-# Change this to your actual Vercel or Render domain
-DOMAIN = "https://tapi-e.vercel.app" 
 
 def get_vid(u):
     m = re.search(r"(?:v=|\/|be\/)([0-9A-Za-z_-]{11})", u)
     return m.group(1) if m else None
 
 @app.get("/download/{url:path}")
-async def get_data(url: str):
+async def get_data(url: str, request: Request):
     vid = get_vid(url)
     if not vid: return {"success": False, "error": "Invalid URL"}
     
-    # 1. Return from Cache (Bandwidth Saver)
     if vid in CACHE and time.time() < CACHE[vid]["exp"]:
         return CACHE[vid]["data"]
 
     target = f"https://www.youtube.com/watch?v={vid}"
     
-    # 2. Try random proxy to fetch from Vidssave
     for _ in range(3):
         p = random.choice(PROXIES)
         try:
@@ -62,12 +57,15 @@ async def get_data(url: str):
             j = r.json()
             if j.get("status") == 1:
                 data = j["data"]
+                # Get the domain of the current request automatically
+                host = str(request.base_url).rstrip('/')
+                
                 formats = []
                 for f in data.get("resources", []):
                     if f.get("download_mode") == "direct":
-                        # ENCODE the URL for our /stream tunnel
                         encoded_url = urllib.parse.quote(f.get("download_url"))
-                        stream_link = f"{DOMAIN}/stream?url={encoded_url}"
+                        # This link points to our streamer
+                        stream_link = f"{host}/stream?url={encoded_url}"
                         
                         formats.append({
                             "q": f.get("quality"),
@@ -76,39 +74,27 @@ async def get_data(url: str):
                             "u": stream_link
                         })
                 
-                res = {
-                    "success": True,
-                    "title": data.get("title"),
-                    "thumbnail": data.get("thumbnail"),
-                    "formats": formats
-                }
+                res = {"success": True, "title": data.get("title"), "formats": formats}
                 CACHE[vid] = {"data": res, "exp": time.time() + 900}
                 return res
         except: continue
-
     return {"success": False, "error": "API Busy"}
 
 @app.get("/stream")
 async def stream_video(url: str = Query(...)):
-    """
-    FIX: Tunnels the download so Vidssave doesn't give a 403 Forbidden error.
-    """
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://vidssave.com/"}
     
     def generate():
-        with requests.get(url, headers=headers, stream=True, timeout=20) as r:
-            for chunk in r.iter_content(chunk_size=128*1024):
+        with requests.get(url, headers=headers, stream=True) as r:
+            for chunk in r.iter_content(chunk_size=256*1024):
                 yield chunk
 
-    # Get file headers
-    r_head = requests.head(url, headers=headers, timeout=10)
-    
+    r_head = requests.head(url, headers=headers)
     return StreamingResponse(
         generate(),
         media_type="video/mp4",
         headers={
             "Content-Disposition": 'attachment; filename="video.mp4"',
-            "Content-Length": r_head.headers.get("Content-Length", ""),
-            "Access-Control-Allow-Origin": "*"
+            "Content-Length": r_head.headers.get("Content-Length", "")
         }
-    )
+)
